@@ -248,7 +248,7 @@ results = {
 }
 print(board.algebraic_history)
 print(board.outcome())
-print(board.get_move_history())
+print(board.move_history())
 
 result = board.result()
 print(results[result])
