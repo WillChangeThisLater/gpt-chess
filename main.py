@@ -28,11 +28,73 @@ class ChessBoard(chess.Board):
 
         self.push_san(move)
 
-    def get_move_history(self) -> List[str]:
-        moves = self.move_stack
+    def move_history(self) -> str:
+        moves = self.algebraic_history
+
+        turn = 0
+        white_turn = True
+        lines = []
+        row = ""
+
+        for move in moves:
+            if white_turn:
+                turn += 1
+                row = f"{turn}. {move}"
+                white_turn = False
+            else:
+                row += f" {move}"
+                lines.append(row)
+                row = ""
+                white_turn = True
+
+        if row:
+            lines.append(row)
+
+        return "\n".join(lines)
+
+    def pretty(self) -> str:
+    
+        pieces = {
+            "r": "♜",
+            "n": "♞",
+            "b": "♝",
+            "q": "♛",
+            "k": "♚",
+            "p": "♟",
+            "R": "♖",
+            "N": "♘",
+            "B": "♗",
+            "Q": "♕",
+            "K": "♔",
+            "P": "♙",
+        }
+    
+        board_rows = []
+        board_rows.append("       (black)")
+        board_rows.append("")
+        board_rows.append("  a b c d e f g h")
+        for i, row in enumerate(str(self).splitlines()):
+            for piece_name, piece_unicode in pieces.items():
+                row = row.replace(piece_name, piece_unicode)
+    
+            board_rows.append(f"{8-i} {row}")
+    
+        board_rows.append("")
+        board_rows.append("       (white)")
+        return "\n".join(board_rows)
+    
+    def draw(self):
+        print(self.pretty())
+    
+    def get_valid_moves(self, move_type: str = "uci") -> List[str]:
+        # 'type' can be uci or san
+        moves = list(self.generate_legal_moves())
+
+        if move_type == "san":
+            moves = [self.san(move) for move in moves]
+
         moves = [str(move) for move in moves]
         return moves
-
 
 
 class Player(ABC):
@@ -48,7 +110,7 @@ class Random(Player):
         pass
 
     def get_move(self, board: ChessBoard) -> str:
-        legal_moves = get_possible_moves(board)
+        legal_moves = board.get_valid_moves()
         return random.choice(legal_moves)
 
 
@@ -76,290 +138,108 @@ class OpenAI(Player):
     def __init__(self, model: str = "gpt-4o-mini"):
         self.model = models.openai(model)
 
-    def _determine_strategy(self, board: chess.Board) -> str:
-        pass
-
-    def get_move(self, board: ChessBoard) -> str:
-        valid_moves = get_possible_moves(board)
-        generator = outlines.generate.choice(self.model, valid_moves)
+    def unstructured_move_prompt(self, board: ChessBoard) -> str:
         prompt = f"""
-You are a chess grandmaster playing in the world chess championship.
+You are a chess grandmaster evaluating a game.
 The game has progressed as follows:
 
 ```move_history
-{board.get_move_history()}
+{board.move_history()}
 ```
 
-And now the board is in the following position:
+The board is in the following position:
 
 ```current_board
-{prettify_board(board)}
+{board.pretty()}
 ```
 
-{board.waiting_on().upper()} to move.
+{board.waiting_on().lower().capitalize()} to move.
 
-Determine the next best move. Return only the next best
-move; no explanation of any kind. Use UCI notation.
+As grandmaster, determine the next best move for {board.waiting_on().lower().capitalize()}.
+Be detailed. Think ahead. Explain your reasoning.
+"""
+        return prompt
+
+    def extract_move_prompt(self, board: ChessBoard, grandmaster_suggestion: str) -> str:
+        prompt = f"""
+A chess board is in the following state
+
+{board.pretty()}
+
+A grandmaster gave the following analysis:
+
+{grandmaster_suggestion}
+
+Extract the next move the grandmaster suggested.
+Respond with only the next move suggested by the grandmaster.
+Do not respond with any additional information of any kind
+
+Good answers:
+
+    e5       # valid move in algebraic notation
+
+Bad answers:
+
+    1... e5  # move should not include leading numbers
         """
+        return prompt
+
+    def get_move(self, board: ChessBoard) -> str:
+        prompt = self.unstructured_move_prompt(board)
+        move_suggestion = self.model(prompt)
+        print("*"*25)
+        print(prompt)
+        print(move_suggestion)
+        print("*"*25)
+
+        print("*"*25)
+        prompt = self.extract_move_prompt(board, move_suggestion)
+        move = self.model(prompt)
+        print(board.get_valid_moves(move_type="san"))
+        print(prompt)
+        print(move)
+
+        valid_move = True
+        try:
+            board.parse_san(move)
+        except ValueError:
+            valid_move = False
+
+        if valid_move:
+            print("MOVE VALID!!")
+            print("*"*25)
+            return move
+        print("*"*25)
+
+        print("*"*25)
+        print("FORCING MOVE")
+        valid_moves = board.get_valid_moves(move_type="san")
+        generator = outlines.generate.choice(self.model, valid_moves)
         move = generator(prompt)
-        print(f"openai move is {move}")
+        print("*"*25)
         return move
 
 
-def ai_move(board: chess.Board, model: str = "gpt-4o-mini") -> str:
-    model = models.openai(model)
-    raw_prompt = textwrap.dedent(f"""
-You are a chess grandmaster playing in the world chess championship.
-The game has progressed as follows:
-
-```move_history
-{get_move_history(board)}
-```
-
-And now the board is in the following position:
-
-```current_board
-{prettify_board(board)}
-```
-
-{waiting_on(board).upper()} to move.
-
-Determine the best line. Think as many steps ahead as
-you can. Explain your reasoning. Use UCI notation.
-""")
-
-    next_move_explanation = model(raw_prompt)
-    choice_prompt = f"""
-You are transcribing a chess sequence. The game thus far is as follows:
-
-{get_move_history(board)}
-
-Your job is to extract the next move in the game from a text
-summary, which is below. Provide this move in UCI notation.
-Do not provide explanations of any kind. Do not provide multiple moves
-
-Example 1 (Good):
-
-    Explanation:
-
-        Thus far the game has progressed as follows:
-
-        1. Nf3 Nf6 2. c4 g6 3. Nc3 Bg7 4. d4 O-O 5. Bf4 d5 6. Qb3 dxc4
-        7. Qxc4 c6 8. e4 Nbd7 9. Rd1 Nb6 10. Qc5 Bg4 11. Bg5 Na4 12. Qa3
-        Nxc3 13. bxc3 Nxe4 14. Bxe7 Qb6 15. Bc4 Nxc3 16. Bc5 Rfe8+ 17. Kf1
-
-        Unintuitive as it may seem, Be6!! is the best move. The idea is to offer
-        the queen in exchange for a fierce attack with minor pieces. Declining this
-        offer is not: 18. Bxe6 leads to a 'Philidor Mate' (smothered mate) with ...Qb5+ 19. Kg1 Ne2+ 20. Kf1 Ng3+ 21. Kg1 Qf1+ 22. Rxf1 Ne2#. Other ways to decline the queen also run into trouble: e.g., 18. Qxc3 Qxc5
-
-    Answer:
-
-        g4e6
-
-
-Example 2 (Bad):
-
-    Explanation:
-
-        In the given position, it's Black's turn to move, and the board looks like this:
-        
-        ```
-          a b c d e f g h
-        8 r n b q k b . r
-        7 p p p p . p p p
-        6 . . . . . n . .
-        5 . . . . p . . .
-        4 . . P P . . . .
-        3 . . . . P . . .
-        2 P P . . . P P P
-        1 R N B Q K B N R
-        ```
-        
-        As Black, a strong move here is **...dxc4**. This move captures the pawn on c4, gaining a material advantage and undermining White's pawn structure in the center.
-
-    Answer:
-
-        dxc4
-
-    Why is this answer wrong?
-
-        The answer should be in UCI notation. 'd7c4' is the correct answer.
-
-
-Example 3 (Good):
-
-    Explanation:
-
-        Opening with 1. e4 is one of the most common and traditional choices for White. It sets up for open games, including the Spanish game (Ruy Lopez), Italian game, King's Gambit, etc., depending on Black's responses.
-        
-        1... c5 (Sicilian Defense)
-        
-           1.2. Nf3 and d4 to take control of the center. But the Sicilian Defense is known for creating an imbalanced game that gives both players chances for a win.
-        
-        1... e5 (Open Game)
-        
-          1.2. Nf3 aiming to attack the pawn at e5. If Black tries to protect the pawn, several promising lines such as Ruy Lopez and the Italian Game can occur.
-        1... e6 (French Defense)
-        
-          1.2. d4 to dominate the center. This can lead to complex battles, some lines include the Advance, Tarrasch, and Winawer Variations.
-        
-        1... c6 (Caro-Kann Defense)
-        
-          1.2. d4 to hold the center, followed by 1. Nc3 or Nf3, depending on the black response. Both response leads to dynamic and strategic plans for both sides.
-        
-        1... d6 (Pirc Defense)
-        
-          2. d4 pushing the dominance in the center. 2. Nc3, Be3, or Nf3 can follow.
-        
-    Answer:
-
-        e4
-
-
-Example 4 (Bad):
-
-    Explanation:
-
-        Let’s analyze the current position carefully. The board is set up as follows:
-        
-        ```
-        8 r n b . . . . r
-        7 p p p k . p p .
-        6 . . . . . . . .
-        5 . . . Q . . . p
-        4 P . . P . . . .
-        3 . . P . P N . .
-        2 . . . . B . P P
-        1 R N . . K . . R
-        ```
-        
-        **Best Move:**
-        **Qe2 - Moving Queen back to e2 (defensive move)**
-        
-        **Explanation of Best Move:**
-        - **Defensive Support:** This reinforces the defense against threats to the black king while helping shift the dynamic. The queen stays connected to the center and controls c4.
-        - Any push you'd consider missing this opportunity leaves the king open to checks.
-        
-        While conceding material, it balances the board's activities and offers tactical chances in the next few moves to work towards safety. Going forward after this, options must be limited to strategic control over the center, developing pieces, and maybe commencing a pawn storm.
-
-    Answer:
-
-        d7e8
-
-    Why is this answer wrong?
-
-        d7e8 is not the suggested move. The suggested is Qe2, which is
-        <> in UCI notation.
-
-Example 5 (Good):
-
-    Explanation:
-
-        Thus far the game has progressed as follows:
-        
-        1. e4 e5 2. Nf3 d6 3. d4 Bg4?! 4. dxe5 Bxf3 5. Qxf3 dxe5 6. Bc4 Nf6? 7. Qb3 
-        
-        Qe7 is the only good move. White is threatening mate in two moves,
-        for example 7...Nc6 8.Bxf7+ Ke7 (or Kd7) 9.Qe6#. 7...Qd7 loses the
-        rook to 8.Qxb7 followed by 9.Qxa8 (since 8...Qc6? would lose
-        the queen to 9.Bb5). Notice that 7...Qe7 saves the rook with
-        this combination: 8.Qxb7 Qb4+ forcing a queen exchange.
-        
-        Although this move prevents immediate disaster, I will be forced to block
-        the f8-bishop, impeding development and kingside castling.
-
-    Answer:
-
-        d8e7
-
-
-Your task is below.
-
-Explanation:
-
-{next_move_explanation}
-
-Answer:
-"""
-    valid_moves = get_possible_moves(board)
-    generator = outlines.generate.choice(model, valid_moves)
-    move = generator(choice_prompt)
-
-    print("*"*25)
-    print(get_move_history(board))
-    print(next_move_explanation)
-    print(move)
-    print("*"*25)
-    return move
-
-def get_white_move(board: chess.Board) -> str:
-    #print("White: stockfish @ 1390")
-    return stockfish_move(board, elo=1390)
-
-def get_black_move(board: chess.Board) -> str:
-    #print(f"Black: {model}")
-    return ai_move(board, "gpt-4o-mini")
-    #return stockfish_move(board, elo=1750)
-
-def prettify_board(board: chess.Board) -> str:
-
-    pieces = {
-        "r": "♜",
-        "n": "♞",
-        "b": "♝",
-        "q": "♛",
-        "k": "♚",
-        "p": "♟",
-        "R": "♖",
-        "N": "♘",
-        "B": "♗",
-        "Q": "♕",
-        "K": "♔",
-        "P": "♙",
-    }
-
-    board_rows = []
-    board_rows.append("  a b c d e f g h")
-    for i, row in enumerate(str(board).splitlines()):
-        for piece_name, piece_unicode in pieces.items():
-            row = row.replace(piece_name, piece_unicode)
-
-        board_rows.append(f"{8-i} {row}")
-
-    return "\n".join(board_rows)
-
-def draw_board(board):
-    print(prettify_board(board))
-
-def get_possible_moves(board: chess.Board) -> List[str]:
-    moves = list(board.generate_legal_moves())
-    moves = [str(move) for move in moves]
-    return moves
-
 board = ChessBoard()
-draw_board(board)
-
-#print("White: stockfish @ 1390")
-#print("Black: gpt-4o-mini")
+board.draw()
 
 white = Stockfish(1320)
+#black = Stockfish(1500)
 black = OpenAI()
-#black = Random()
+
+moves = 0
 while not board.is_game_over():
+    moves += 1
     turn = board.waiting_on()
     move = white.get_move(board) if turn == "white" else black.get_move(board)
     board.submit_move(move)
 
     print()
-    draw_board(board)
+    board.draw()
     print()
 
 assert board.is_game_over()
-draw_board(board)
-
-# TODO: convert moves from UCI format to algebraic format
-# Should probably subclass chess.Board to do this
-
+board.draw()
 
 results = {
     "1/2-1/2": "tie",
